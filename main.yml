@@ -1,0 +1,12 @@
+---
+- name:  pre-download
+  import_playbook: pre-download.yml
+
+- name:  logstash-upgrade
+  import_playbook: logstash-upgrade.yml
+
+- name:  elasticsearch-rolling-upgrade
+  import_playbook: elasticsearch-rolling-upgrade.yml
+
+- name:  kibana-upgrade
+  import_playbook: kibana-upgrade.yml

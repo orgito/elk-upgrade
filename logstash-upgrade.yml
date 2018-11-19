@@ -1,0 +1,31 @@
+---
+- name: Upgrade logstash
+  hosts: logstash
+  gather_facts: no
+
+  tasks:
+  - name: Validate ELK Version
+    fail: msg="Invalid ELK Version"
+    when: elk_version is undefined or not elk_version is match("\d+\.\d+\.\d+")
+
+  - name: Get logstash current version
+    command: rpm -q logstash --qf %{VERSION}
+    changed_when: False
+    register: version_found
+
+  - name: Display Current logstash Version
+    debug: var=version_found.stdout
+
+  - block:
+    - name: Update logstash
+      yum:
+        name: logstash-{{ elk_version }}
+        state: present
+
+    - name: Restart logstash
+      systemd:
+        name: logstash
+        state: restarted
+        enabled: yes
+        daemon_reload: yes
+    when: version_found.stdout is version_compare(elk_version, '<')

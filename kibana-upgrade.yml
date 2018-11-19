@@ -1,0 +1,59 @@
+---
+- name: Upgrade kibana
+  hosts: kibana
+  gather_facts: no
+
+  vars:
+    set_default_index: '{"changes":{"defaultIndex":"syslog"}}'
+
+  tasks:
+  - name: Validate ELK Version
+    fail: msg="Invalid ELK Version"
+    when: elk_version is undefined or not elk_version is match("\d+\.\d+\.\d+")
+
+  - name: Get kibana current version
+    command: rpm -q kibana --qf %{VERSION}
+    args:
+      warn: no
+    changed_when: False
+    register: version_found
+
+  - name: Display Current kibana Version
+    debug: var=version_found.stdout
+
+  - block:
+    - name: Update kibana
+      yum:
+        name: kibana-{{ elk_version }}
+        state: present
+
+    - name: Restart kibana
+      systemd:
+        name: kibana
+        state: restarted
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Wait for kibana to start listening
+      wait_for:
+        port: 5601
+        delay: 5
+
+    - name: Wait for kibana to be ready
+      uri:
+        url: http://localhost:5601/api/kibana/settings
+        method: GET
+      register: response
+      until: "'kbn_name' in response and response.status == 200"
+      retries: 30
+      delay: 5
+
+    - name: Set Default Index
+      uri:
+        url: http://localhost:5601/api/kibana/settings
+        method: POST
+        body_format: json
+        body: "{{ set_default_index }}"
+        headers:
+          "kbn-version": "{{ elk_version }}"
+    when: version_found.stdout is version_compare(elk_version, '<')

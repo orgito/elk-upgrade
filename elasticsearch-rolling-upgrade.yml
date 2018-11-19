@@ -1,0 +1,160 @@
+---
+- name: Elasticsearch rolling upgrade
+  hosts: elasticsearch
+  gather_facts: no
+  serial: 1
+
+  vars:
+    es_disable_allocation: '{"transient":{"cluster.routing.allocation.enable":"none"}}'
+    es_enable_allocation: '{"transient":{"cluster.routing.allocation.enable": "all","cluster.routing.allocation.node_concurrent_recoveries": 5,"indices.recovery.max_bytes_per_sec": "500mb"}}'
+    es_http_port: 9200
+    es_transport_port: 9300
+    # s3_plugin_url: https://artifacts.elastic.co/downloads/elasticsearch-plugins/repository-s3/repository-s3-{{ elk_version }}.zip
+
+  tasks:
+  - name: Validate ELK Version
+    fail: msg="Invalid ELK Version"
+    when: elk_version is undefined or not elk_version is match("\d+\.\d+\.\d+")
+
+  - name: Set the es_host for the first host
+    set_fact:
+      es_host: "{{ groups.elasticsearch[1] }}"
+    when: "inventory_hostname == groups.elasticsearch[0]"
+
+  - name: Set the es_host for the remaining hosts
+    set_fact:
+      es_host: "{{ groups.elasticsearch[0] }}"
+    when: "inventory_hostname != groups.elasticsearch[0]"
+
+  - name: Ensure elasticsearch service is running
+    systemd:
+      name: elasticsearch
+      enabled: yes
+      state: started
+    register: response
+
+  - name: Wait for elasticsearch node to come back up if it was stopped
+    wait_for:
+      port: "{{ es_transport_port }}"
+      delay: 45
+    when: response.changed == true
+
+  - name: Check current version
+    uri:
+      url: http://localhost:{{ es_http_port }}
+      method: GET
+    register: version_found
+    retries: 10
+    delay: 10
+
+  - name: Display Current Elasticsearch Version
+    debug: var=version_found.json.version.number
+
+  - block:
+    - name: Enable shard allocation for the cluster
+      uri:
+        url: http://localhost:{{ es_http_port }}/_cluster/settings
+        method: PUT
+        body_format: json
+        body: "{{ es_enable_allocation }}"
+
+    - name: Wait for cluster health to return to green
+      uri:
+        url: http://localhost:{{ es_http_port }}/_cluster/health
+        method: GET
+      register: response
+      until: "response.json.status == 'green'"
+      retries: 500
+      delay: 15
+
+    - name: Disable shard allocation for the cluster
+      uri:
+        url: http://localhost:{{ es_http_port }}/_cluster/settings
+        method: PUT
+        body_format: json
+        body: {{ es_disable_allocation }}
+
+    - name: Perform a synced flush
+      uri:
+        url: http://localhost:{{ es_http_port }}/_flush/synced
+        method: POST
+        status_code: "200, 409"
+
+    - name: Shutdown elasticsearch node
+      systemd:
+        name: elasticsearch
+        state: stopped
+
+    - name: Update elasticsearch
+      yum:
+        name: elasticsearch-{{ elk_version }}
+        state: present
+
+    # - name: Download repository-s3 plugin
+    #   get_url: url={{ s3_plugin_url }} dest=/tmp/repository-s3-{{ elk_version }}.zip
+
+    # - name: Remove repository-s3 plugin
+    #   shell: /usr/share/elasticsearch/bin/elasticsearch-plugin remove -v repository-s3
+
+    # - name: Upgrade repository-s3 plugin
+    #   shell: /usr/share/elasticsearch/bin/elasticsearch-plugin install -v -b file:///tmp/repository-s3-{{ elk_version }}.zip
+
+    # - name: Remove repository-s3 installer
+    #   file: path=/tmp/repository-s3-{{ elk_version }}.zip state=absent
+
+    - name: Wait for all shards to be reallocated
+      uri:
+        url: http://{{ es_host }}:{{ es_http_port }}/_cluster/health
+        method: GET
+      register: response
+      until: "response.json.relocating_shards == 0"
+      retries: 20
+      delay: 15
+
+    - name: Start elasticsearch
+      systemd:
+        name: elasticsearch
+        state: restarted
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Wait for elasticsearch node to come back up
+      wait_for:
+        port: "{{ es_transport_port }}"
+        delay: 35
+
+    - name: Wait for elasticsearch http to come back up
+      wait_for:
+        port: "{{ es_http_port }}"
+        delay: 5
+
+    - name: Wait for cluster health to return to yellow or green
+      uri:
+        url: http://localhost:{{ es_http_port }}/_cluster/health
+        method: GET
+      register: response
+      until: "response.json.status == 'yellow' or response.json.status == 'green'"
+      retries: 500
+      delay: 15
+
+    - name: Enable shard allocation for the cluster
+      uri:
+        url: http://localhost:{{ es_http_port }}/_cluster/settings
+        method: PUT
+        body_format: json
+        body: "{{ es_enable_allocation }}"
+      register: response
+      until: "response.json.acknowledged == true"
+      retries: 10
+      delay: 15
+
+    - name: Wait for the node to recover
+      uri:
+        url: http://localhost:{{ es_http_port }}/_cat/health
+        method: GET
+        return_content: yes
+      register: response
+      until: "'green' in response.content"
+      retries: 500
+      delay: 15
+    when: version_found.json.version.number is version_compare(elk_version, '<')
