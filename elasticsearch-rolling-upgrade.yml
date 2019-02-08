@@ -72,7 +72,7 @@
         url: http://localhost:{{ es_http_port }}/_cluster/settings
         method: PUT
         body_format: json
-        body: {{ es_disable_allocation }}
+        body: "{{ es_disable_allocation }}"
 
     - name: Perform a synced flush
       uri:
